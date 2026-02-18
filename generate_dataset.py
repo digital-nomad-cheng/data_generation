@@ -18,12 +18,39 @@ import sys
 
 from prompt_templates import generate_balanced_prompts, generate_random_prompt
 
+import random
+
 MODEL_BASE = "stabilityai/stable-diffusion-xl-base-1.0"
 MODEL_REPO = "ByteDance/SDXL-Lightning"
 MODEL_CKPT = "sdxl_lightning_4step_unet.safetensors"
 NUM_STEPS = 4  # Must match checkpoint (4-step)
 GUIDANCE_SCALE = 0  # CFG-free distillation requires 0
 MODEL_NAME = "ByteDance/SDXL-Lightning (4-step)"
+
+# Realistic frontal-camera resolution presets (name, width, height)
+# All dims are multiples of 8, sized for SDXL's sweet spot (512-768)
+CAMERA_PRESETS = [
+    # Portrait selfie (most common frontal camera orientation)
+    {"name": "portrait_hd",    "width": 512, "height": 640},
+    {"name": "portrait_tall",  "width": 480, "height": 640},
+    {"name": "portrait_4_3",   "width": 512, "height": 680},
+    # Square (Instagram-style, many phone front cams)
+    {"name": "square_512",     "width": 512, "height": 512},
+    {"name": "square_576",     "width": 576, "height": 576},
+    # Landscape (tablet / rotated phone)
+    {"name": "landscape_16_9", "width": 640, "height": 360},
+    {"name": "landscape_4_3",  "width": 640, "height": 480},
+    # Slightly wider portrait (modern tall phones)
+    {"name": "portrait_9_16",  "width": 432, "height": 768},
+]
+
+# Weights: portrait orientations are more common for frontal cameras
+_PRESET_WEIGHTS = [3, 2, 2, 2, 1, 1, 1, 2]
+
+
+def pick_camera_resolution() -> dict:
+    """Return a random camera-like (width, height, name) dict."""
+    return random.choices(CAMERA_PRESETS, weights=_PRESET_WEIGHTS, k=1)[0]
 
 
 class DatasetGenerator:
@@ -106,7 +133,7 @@ class DatasetGenerator:
         # Apply optimizations
         if gpu_memory < 12:
             print(f"GPU VRAM: {gpu_memory:.1f}GB - Applying memory optimizations...")
-            self.pipe.enable_sequential_cpu_offload()
+            self.pipe.enable_model_cpu_offload()   # Faster than sequential_cpu_offload
             self.pipe.enable_attention_slicing(1)
             self.pipe.vae.enable_slicing()
             self.pipe.vae.enable_tiling()
@@ -121,11 +148,12 @@ class DatasetGenerator:
         prompt: str,
         index: int,
         attributes: dict,
-        height: int = 1024,
-        width: int = 1024,
+        height: int = 512,
+        width: int = 512,
         num_steps: int = NUM_STEPS,
         guidance_scale: float = GUIDANCE_SCALE,
-        seed: int = None
+        seed: int = None,
+        camera_preset: str = "square_512",
     ):
         """Generate a single image and save with metadata."""
 
@@ -163,7 +191,8 @@ class DatasetGenerator:
                 "width": width,
                 "num_steps": num_steps,
                 "guidance_scale": guidance_scale,
-                "seed": seed if seed is not None else index
+                "seed": seed if seed is not None else index,
+                "camera_preset": camera_preset,
             },
             "timestamp": datetime.now().isoformat(),
             "model": MODEL_NAME
@@ -245,15 +274,20 @@ class DatasetGenerator:
                     'ethnicity': attributes.get('ethnicity', 'N/A')[:10]
                 })
 
+                # Pick a random camera resolution for this image
+                cam = pick_camera_resolution()
+                img_h, img_w = cam["height"], cam["width"]
+
                 # Generate image
                 self.generate_image(
                     prompt=prompt,
                     index=i,
                     attributes=attributes,
-                    height=height,
-                    width=width,
+                    height=img_h,
+                    width=img_w,
                     num_steps=num_steps,
-                    guidance_scale=guidance_scale
+                    guidance_scale=guidance_scale,
+                    camera_preset=cam["name"],
                 )
 
                 # Update progress
@@ -347,14 +381,14 @@ def main():
     parser.add_argument(
         "--height",
         type=int,
-        default=1024,
-        help="Image height (default: 1024)"
+        default=512,
+        help="Image height (default: 512, use 1024 for higher quality)"
     )
     parser.add_argument(
         "--width",
         type=int,
-        default=1024,
-        help="Image width (default: 1024)"
+        default=512,
+        help="Image width (default: 512, use 1024 for higher quality)"
     )
     parser.add_argument(
         "--steps",
